@@ -1,124 +1,434 @@
 import os
 os.environ.setdefault("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
 
-from fastapi import FastAPI, HTTPException, Query
-from typing import Optional
+from fastapi import FastAPI, HTTPException, Query, Depends, status
+from typing import Optional, List
+from datetime import datetime
 from noteiq.models import (
     Note, NoteCreate, NoteUpdate,
-    SummarizeResponse, ActionsResponse, AskRequest, AskResponse, OutlineResponse
+    SummarizeResponse, ActionsResponse, AskRequest, AskResponse, OutlineResponse,
+    NoteStats, HealthResponse, NotePriority
 )
 from noteiq.storage import NoteStorage
 from noteiq.ai import AINotes
+from noteiq.exceptions import APIKeyError, AIError, NoteNotFoundError
+from noteiq.utils import logger, log_info, log_error
 
 
-app = FastAPI(title="NoteIQ API", description="AI-Powered Notes API")
+# Initialize storage
 storage = NoteStorage()
 
+# Create FastAPI app
+app = FastAPI(
+    title="NoteIQ API",
+    description="AI-Powered Notes API - Create, organize, and interact with notes using AI",
+    version="1.1.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
 
-@app.get("/")
+
+def get_ai() -> AINotes:
+    """Dependency to get AI instance"""
+    try:
+        return AINotes()
+    except APIKeyError:
+        raise HTTPException(
+            status_code=503,
+            detail="AI service unavailable. Please configure OPENAI_API_KEY."
+        )
+
+
+@app.get("/", response_model=dict)
 def root():
-    return {"message": "Welcome to NoteIQ API", "version": "1.0.0"}
+    """Root endpoint"""
+    return {
+        "message": "Welcome to NoteIQ API",
+        "version": "1.1.0",
+        "docs": "/docs"
+    }
 
 
-@app.post("/api/notes", response_model=Note)
+@app.get("/health", response_model=HealthResponse)
+def health_check():
+    """Health check endpoint"""
+    # Check storage
+    storage_status = "healthy"
+    try:
+        storage.get_all()
+    except Exception:
+        storage_status = "unhealthy"
+    
+    # Check AI
+    ai_status = "disabled"
+    if os.getenv("OPENAI_API_KEY"):
+        ai_status = "enabled"
+    
+    return HealthResponse(
+        status="healthy" if storage_status == "healthy" else "degraded",
+        version="1.1.0",
+        timestamp=datetime.utcnow(),
+        storage_status=storage_status,
+        ai_status=ai_status
+    )
+
+
+@app.post("/api/notes", response_model=Note, status_code=status.HTTP_201_CREATED)
 def create_note(note: NoteCreate):
     """Create a new note."""
-    new_note = Note(
-        title=note.title,
-        content=note.content,
-        tags=note.tags
-    )
-    return storage.create(new_note)
+    try:
+        log_info(f"Creating note: {note.title}")
+        
+        # Create note
+        new_note = Note(
+            title=note.title,
+            content=note.content,
+            tags=note.tags,
+            priority=note.priority
+        )
+        
+        return storage.create(new_note)
+        
+    except Exception as e:
+        log_error(f"Error creating note: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create note")
 
 
-@app.get("/api/notes", response_model=list[Note])
-def list_notes(tag: Optional[str] = Query(None, description="Filter by tag")):
-    """List all notes, optionally filtered by tag."""
-    return storage.get_all(tag=tag)
+@app.get("/api/notes", response_model=List[Note])
+def list_notes(
+    tag: Optional[str] = Query(None, description="Filter by tag"),
+    include_archived: bool = Query(False, description="Include archived notes"),
+    priority: Optional[NotePriority] = Query(None, description="Filter by priority"),
+    limit: int = Query(50, ge=1, le=100, description="Max notes to return"),
+    offset: int = Query(0, ge=0, description="Number of notes to skip")
+):
+    """List all notes, optionally filtered by tag, priority, or archived status."""
+    try:
+        notes = storage.get_all(tag=tag, include_archived=include_archived)
+        
+        # Filter by priority if specified
+        if priority:
+            notes = [n for n in notes if n.priority == priority]
+        
+        # Apply pagination
+        return notes[offset:offset + limit]
+        
+    except Exception as e:
+        log_error(f"Error listing notes: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list notes")
+
+
+@app.get("/api/notes/stats", response_model=NoteStats)
+def get_stats():
+    """Get note statistics"""
+    try:
+        return storage.get_stats()
+    except Exception as e:
+        log_error(f"Error getting stats: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get statistics")
+
+
+@app.get("/api/notes/search", response_model=List[Note])
+def search_notes(
+    q: str = Query(..., description="Search query"),
+    tags: Optional[str] = Query(None, description="Comma-separated tags"),
+    limit: int = Query(20, ge=1, le=100)
+):
+    """Search notes by query and tags"""
+    try:
+        tag_list = [t.strip() for t in tags.split(",")] if tags else None
+        return storage.search(q, tags=tag_list)[:limit]
+    except Exception as e:
+        log_error(f"Error searching notes: {e}")
+        raise HTTPException(status_code=500, detail="Failed to search notes")
 
 
 @app.get("/api/notes/{note_id}", response_model=Note)
 def get_note(note_id: str):
     """Get a specific note by ID."""
-    note = storage.get_by_id(note_id)
-    if not note:
-        raise HTTPException(status_code=404, detail="Note not found")
-    return note
+    try:
+        note = storage.get_by_id(note_id)
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found")
+        return note
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Error getting note: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get note")
 
 
 @app.put("/api/notes/{note_id}", response_model=Note)
 def update_note(note_id: str, note_update: NoteUpdate):
     """Update an existing note."""
-    existing = storage.get_by_id(note_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Note not found")
-    
-    # Apply updates
-    if note_update.title is not None:
-        existing.title = note_update.title
-    if note_update.content is not None:
-        existing.content = note_update.content
-    if note_update.tags is not None:
-        existing.tags = note_update.tags
-    
-    return storage.update(note_id, existing)
+    try:
+        existing = storage.get_by_id(note_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Note not found")
+        
+        # Apply updates
+        if note_update.title is not None:
+            existing.title = note_update.title
+        if note_update.content is not None:
+            existing.content = note_update.content
+        if note_update.tags is not None:
+            existing.tags = note_update.tags
+        if note_update.priority is not None:
+            existing.priority = note_update.priority
+        if note_update.is_pinned is not None:
+            existing.is_pinned = note_update.is_pinned
+        if note_update.is_archived is not None:
+            existing.is_archived = note_update.is_archived
+        
+        return storage.update(note_id, existing)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Error updating note: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update note")
 
 
 @app.delete("/api/notes/{note_id}")
 def delete_note(note_id: str):
     """Delete a note."""
-    success = storage.delete(note_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Note not found")
-    return {"message": "Note deleted successfully"}
+    try:
+        success = storage.delete(note_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Note not found")
+        return {"message": "Note deleted successfully", "note_id": note_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Error deleting note: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete note")
+
+
+@app.post("/api/notes/{note_id}/pin")
+def pin_note(note_id: str):
+    """Pin a note"""
+    try:
+        note = storage.pin(note_id)
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found")
+        return {"message": "Note pinned", "note_id": note_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Error pinning note: {e}")
+        raise HTTPException(status_code=500, detail="Failed to pin note")
+
+
+@app.post("/api/notes/{note_id}/unpin")
+def unpin_note(note_id: str):
+    """Unpin a note"""
+    try:
+        note = storage.unpin(note_id)
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found")
+        return {"message": "Note unpinned", "note_id": note_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Error unpinning note: {e}")
+        raise HTTPException(status_code=500, detail="Failed to unpin note")
+
+
+@app.post("/api/notes/{note_id}/archive")
+def archive_note(note_id: str):
+    """Archive a note"""
+    try:
+        note = storage.archive(note_id)
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found")
+        return {"message": "Note archived", "note_id": note_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Error archiving note: {e}")
+        raise HTTPException(status_code=500, detail="Failed to archive note")
+
+
+@app.post("/api/notes/{note_id}/unarchive")
+def unarchive_note(note_id: str):
+    """Unarchive a note"""
+    try:
+        note = storage.unarchive(note_id)
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found")
+        return {"message": "Note unarchived", "note_id": note_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Error unarchiving note: {e}")
+        raise HTTPException(status_code=500, detail="Failed to unarchive note")
 
 
 @app.post("/api/notes/{note_id}/summarize", response_model=SummarizeResponse)
-def summarize_note(note_id: str):
+def summarize_note(note_id: str, ai: AINotes = Depends(get_ai)):
     """Generate AI summary of a note."""
-    note = storage.get_by_id(note_id)
-    if not note:
-        raise HTTPException(status_code=404, detail="Note not found")
-    
-    ai = AINotes()
-    summary = ai.summarize(note.content)
-    return SummarizeResponse(summary=summary)
+    try:
+        note = storage.get_by_id(note_id)
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found")
+        
+        summary = ai.summarize(note.content)
+        
+        return SummarizeResponse(
+            summary=summary,
+            original_length=len(note.content),
+            summary_length=len(summary)
+        )
+        
+    except HTTPException:
+        raise
+    except AIError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        log_error(f"Error summarizing note: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate summary")
 
 
 @app.post("/api/notes/{note_id}/actions", response_model=ActionsResponse)
-def extract_actions(note_id: str):
+def extract_actions(note_id: str, ai: AINotes = Depends(get_ai)):
     """Extract action items from a note."""
-    note = storage.get_by_id(note_id)
-    if not note:
-        raise HTTPException(status_code=404, detail="Note not found")
-    
-    ai = AINotes()
-    actions = ai.extract_actions(note.content)
-    return ActionsResponse(action_items=actions)
+    try:
+        note = storage.get_by_id(note_id)
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found")
+        
+        actions = ai.extract_actions(note.content)
+        
+        return ActionsResponse(
+            action_items=actions,
+            count=len(actions)
+        )
+        
+    except HTTPException:
+        raise
+    except AIError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        log_error(f"Error extracting actions: {e}")
+        raise HTTPException(status_code=500, detail="Failed to extract actions")
 
 
 @app.post("/api/notes/{note_id}/ask", response_model=AskResponse)
-def ask_note(note_id: str, request: AskRequest):
+def ask_note(note_id: str, request: AskRequest, ai: AINotes = Depends(get_ai)):
     """Ask a question about a note."""
-    note = storage.get_by_id(note_id)
-    if not note:
-        raise HTTPException(status_code=404, detail="Note not found")
-    
-    ai = AINotes()
-    answer = ai.answer_question(note.content, request.question)
-    return AskResponse(answer=answer)
+    try:
+        note = storage.get_by_id(note_id)
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found")
+        
+        answer = ai.answer_question(note.content, request.question)
+        
+        return AskResponse(
+            answer=answer,
+            question=request.question
+        )
+        
+    except HTTPException:
+        raise
+    except AIError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        log_error(f"Error answering question: {e}")
+        raise HTTPException(status_code=500, detail="Failed to answer question")
 
 
 @app.post("/api/notes/{note_id}/outline", response_model=OutlineResponse)
-def generate_outline(note_id: str):
+def generate_outline(note_id: str, ai: AINotes = Depends(get_ai)):
     """Generate an outline from a note."""
-    note = storage.get_by_id(note_id)
-    if not note:
-        raise HTTPException(status_code=404, detail="Note not found")
-    
-    ai = AINotes()
-    outline = ai.generate_outline(note.content)
-    return OutlineResponse(outline=outline)
+    try:
+        note = storage.get_by_id(note_id)
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found")
+        
+        outline = ai.generate_outline(note.content)
+        
+        return OutlineResponse(
+            outline=outline,
+            sections=len(outline)
+        )
+        
+    except HTTPException:
+        raise
+    except AIError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        log_error(f"Error generating outline: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate outline")
+
+
+@app.post("/api/notes/{note_id}/suggest-tags", response_model=dict)
+def suggest_tags(note_id: str, ai: AINotes = Depends(get_ai)):
+    """Suggest tags for a note."""
+    try:
+        note = storage.get_by_id(note_id)
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found")
+        
+        tags = ai.suggest_tags(note.content)
+        
+        return {"suggested_tags": tags}
+        
+    except HTTPException:
+        raise
+    except AIError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        log_error(f"Error suggesting tags: {e}")
+        raise HTTPException(status_code=500, detail="Failed to suggest tags")
+
+
+@app.post("/api/notes/{note_id}/analyze", response_model=dict)
+def analyze_note(note_id: str, ai: AINotes = Depends(get_ai)):
+    """Perform comprehensive AI analysis of a note."""
+    try:
+        note = storage.get_by_id(note_id)
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found")
+        
+        analysis = ai.analyze_note(note.content)
+        
+        return analysis
+        
+    except HTTPException:
+        raise
+    except AIError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        log_error(f"Error analyzing note: {e}")
+        raise HTTPException(status_code=500, detail="Failed to analyze note")
+
+
+@app.post("/api/notes/bulk-delete")
+def bulk_delete(note_ids: List[str]):
+    """Delete multiple notes at once"""
+    try:
+        deleted = storage.bulk_delete(note_ids)
+        return {
+            "message": f"Deleted {deleted} notes",
+            "deleted_count": deleted
+        }
+    except Exception as e:
+        log_error(f"Error bulk deleting: {e}")
+        raise HTTPException(status_code=500, detail="Failed to bulk delete")
+
+
+@app.delete("/api/notes")
+def clear_all_notes():
+    """Delete all notes (dangerous!)"""
+    try:
+        count = storage.clear_all()
+        return {
+            "message": f"Deleted {count} notes",
+            "deleted_count": count
+        }
+    except Exception as e:
+        log_error(f"Error clearing notes: {e}")
+        raise HTTPException(status_code=500, detail="Failed to clear notes")
 
 
 if __name__ == "__main__":
