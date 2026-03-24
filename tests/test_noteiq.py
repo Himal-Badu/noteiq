@@ -265,7 +265,8 @@ class TestAPIEndpoints:
             json={"title": "API Test", "content": "Test content", "tags": ["test"]}
         )
         
-        assert response.status_code == 200
+        # API returns 201 Created for new resources
+        assert response.status_code == 201
         data = response.json()
         assert data["title"] == "API Test"
         assert "id" in data

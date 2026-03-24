@@ -1,7 +1,7 @@
 """
 Pydantic models for NoteIQ
 """
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 from typing import List, Optional
 from datetime import datetime
 from enum import Enum
@@ -53,10 +53,9 @@ class Note(BaseModel):
             return v.strip()
         return v
     
-    class Config:
-        """Pydantic config"""
-        use_enum_values = True
-        json_schema_extra = {
+    model_config = ConfigDict(
+        use_enum_values=True,
+        json_schema_extra={
             "example": {
                 "title": "Meeting Notes",
                 "content": "Discussed Q1 goals and team expansion",
@@ -64,6 +63,7 @@ class Note(BaseModel):
                 "priority": "medium"
             }
         }
+    )
 
 
 class NoteCreate(BaseModel):
@@ -83,8 +83,8 @@ class NoteCreate(BaseModel):
             return [t.strip() for t in v.split(',') if t.strip()]
         return [t for t in v if t]
     
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "title": "New Note",
                 "content": "Note content here",
@@ -92,6 +92,7 @@ class NoteCreate(BaseModel):
                 "priority": "high"
             }
         }
+    )
 
 
 class NoteUpdate(BaseModel):
@@ -113,13 +114,14 @@ class NoteUpdate(BaseModel):
             return [t.strip() for t in v.split(',') if t.strip()]
         return [t for t in v if t]
     
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "title": "Updated Title",
                 "tags": ["new", "tags"]
             }
         }
+    )
 
 
 class NoteSearch(BaseModel):
@@ -145,25 +147,27 @@ class ActionsResponse(BaseModel):
     action_items: List[str]
     count: int = 0
     
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "action_items": ["Create budget proposal", "Schedule team meeting"],
                 "count": 2
             }
         }
+    )
 
 
 class AskRequest(BaseModel):
     """Request model for asking questions"""
     question: str = Field(..., min_length=1)
     
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "question": "What were the main topics discussed?"
             }
         }
+    )
 
 
 class AskResponse(BaseModel):
@@ -178,13 +182,14 @@ class OutlineResponse(BaseModel):
     outline: List[str]
     sections: int = 0
     
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "outline": ["Introduction", "Main Points", "Conclusion"],
                 "sections": 3
             }
         }
+    )
 
 
 class NoteStats(BaseModel):
