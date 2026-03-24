@@ -1,7 +1,9 @@
 import os
 os.environ.setdefault("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
 
-from fastapi import FastAPI, HTTPException, Query, Depends, status
+from fastapi import FastAPI, HTTPException, Query, Depends, status, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from typing import Optional, List
 from datetime import datetime
 from noteiq.models import (
@@ -11,7 +13,7 @@ from noteiq.models import (
 )
 from noteiq.storage import NoteStorage
 from noteiq.ai import AINotes
-from noteiq.exceptions import APIKeyError, AIError, NoteNotFoundError
+from noteiq.exceptions import APIKeyError, AIError, NoteNotFoundError, ValidationError
 from noteiq.utils import logger, log_info, log_error
 
 
@@ -26,6 +28,53 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# Request logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all incoming requests"""
+    log_info(f"{request.method} {request.url.path}")
+    response = await call_next(request)
+    log_info(f"{request.method} {request.url.path} - {response.status_code}")
+    return response
+
+
+# Exception handlers
+@app.exception_handler(NoteNotFoundError)
+async def note_not_found_handler(request: Request, exc: NoteNotFoundError):
+    """Handle NoteNotFoundError"""
+    return JSONResponse(
+        status_code=404,
+        content={"detail": str(exc)}
+    )
+
+
+@app.exception_handler(AIError)
+async def ai_error_handler(request: Request, exc: AIError):
+    """Handle AIError"""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": str(exc)}
+    )
+
+
+@app.exception_handler(ValidationError)
+async def validation_error_handler(request: Request, exc: ValidationError):
+    """Handle ValidationError"""
+    return JSONResponse(
+        status_code=400,
+        content={"detail": str(exc)}
+    )
 
 
 def get_ai() -> AINotes:
@@ -45,7 +94,24 @@ def root():
     return {
         "message": "Welcome to NoteIQ API",
         "version": "1.1.0",
-        "docs": "/docs"
+        "docs": "/docs",
+        "redoc": "/redoc"
+    }
+
+
+@app.get("/api/version", response_model=dict)
+def get_version():
+    """Get API version information"""
+    return {
+        "version": "1.1.0",
+        "api_version": "v1",
+        "features": {
+            "ai_summarization": True,
+            "action_extraction": True,
+            "qa": True,
+            "outline_generation": True,
+            "tag_suggestion": True
+        }
     }
 
 
@@ -126,6 +192,37 @@ def get_stats():
     except Exception as e:
         log_error(f"Error getting stats: {e}")
         raise HTTPException(status_code=500, detail="Failed to get statistics")
+
+
+@app.get("/api/notes/count", response_model=dict)
+def get_note_count():
+    """Get total note count"""
+    try:
+        notes = storage.get_all()
+        return {
+            "total": len(notes),
+            "active": len([n for n in notes if not n.is_archived]),
+            "archived": len([n for n in notes if n.is_archived]),
+            "pinned": len([n for n in notes if n.is_pinned])
+        }
+    except Exception as e:
+        log_error(f"Error getting count: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get note count")
+
+
+@app.get("/api/tags", response_model=dict)
+def get_all_tags():
+    """Get all unique tags"""
+    try:
+        notes = storage.get_all()
+        tags = {}
+        for note in notes:
+            for tag in note.tags:
+                tags[tag] = tags.get(tag, 0) + 1
+        return {"tags": tags, "count": len(tags)}
+    except Exception as e:
+        log_error(f"Error getting tags: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get tags")
 
 
 @app.get("/api/notes/search", response_model=List[Note])
