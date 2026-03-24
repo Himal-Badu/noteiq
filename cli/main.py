@@ -132,7 +132,9 @@ def delete(note_id):
 @click.option("--content", "-c", help="New content")
 @click.option("--tags", help="New tags (comma-separated)")
 @click.option("--priority", "-p", type=click.Choice(["low", "medium", "high"]), help="New priority")
-def update(note_id, title, content, tags, priority):
+@click.option("--pin/--unpin", "pin_action", default=None, help="Pin or unpin the note")
+@click.option("--archive/--unarchive", "archive_action", default=None, help="Archive or unarchive the note")
+def update(note_id, title, content, tags, priority, pin_action, archive_action):
     """Update a note."""
     try:
         note = storage.get_by_id(note_id)
@@ -149,6 +151,14 @@ def update(note_id, title, content, tags, priority):
             note.tags = [t.strip() for t in tags.split(",")]
         if priority:
             note.priority = NotePriority(priority)
+        if pin_action is True:
+            note.is_pinned = True
+        elif pin_action is False:
+            note.is_pinned = False
+        if archive_action is True:
+            note.is_archived = True
+        elif archive_action is False:
+            note.is_archived = False
         
         updated = storage.update(note_id, note)
         click.echo(f"✓ Note updated: {note_id[:8]}")
@@ -413,6 +423,136 @@ def analyze(note_id):
         click.echo(f"Error: {e}", err=True)
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
+
+
+@cli.command()
+@click.option("--format", "-f", type=click.Choice(["json", "csv", "markdown"]), default="json", help="Export format")
+@click.option("--output", "-o", default="export.json", help="Output file")
+@click.option("--archived", is_flag=True, help="Include archived notes")
+def export(format, output, archived):
+    """Export notes to file."""
+    try:
+        notes = storage.get_all(include_archived=archived)
+        
+        if format == "json":
+            import json
+            data = {
+                "export_date": str(datetime.now()),
+                "notes": [
+                    {
+                        "id": n.id,
+                        "title": n.title,
+                        "content": n.content,
+                        "tags": n.tags,
+                        "priority": n.priority,
+                        "created_at": n.created_at.isoformat(),
+                        "updated_at": n.updated_at.isoformat()
+                    }
+                    for n in notes
+                ]
+            }
+            with open(output, 'w') as f:
+                json.dump(data, f, indent=2)
+            click.echo(f"✓ Exported {len(notes)} notes to {output}")
+        
+        elif format == "csv":
+            import csv
+            with open(output, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['id', 'title', 'content', 'tags', 'priority', 'created_at'])
+                for n in notes:
+                    writer.writerow([n.id, n.title, n.content, ','.join(n.tags), n.priority, n.created_at.isoformat()])
+            click.echo(f"✓ Exported {len(notes)} notes to {output}")
+        
+        elif format == "markdown":
+            import os
+            os.makedirs(output, exist_ok=True)
+            for n in notes:
+                filename = "".join(c for c in n.title if c.isalnum() or c in ' -_')[:50] + ".md"
+                filepath = os.path.join(output, filename)
+                with open(filepath, 'w') as f:
+                    f.write(f"# {n.title}\n\n")
+                    f.write(f"**Tags:** {', '.join(n.tags) if n.tags else 'None'}\n\n")
+                    f.write(f"**Priority:** {n.priority}\n\n")
+                    f.write(f"---\n\n")
+                    f.write(n.content)
+            click.echo(f"✓ Exported {len(notes)} notes to {output}/")
+    
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+
+
+@cli.command()
+@click.argument("file_path")
+@click.option("--format", "-f", type=click.Choice(["json", "csv", "markdown"]), default="auto", help="Import format")
+def import_notes(file_path, format):
+    """Import notes from file."""
+    try:
+        import json
+        import csv
+        from pathlib import Path
+        
+        if format == "auto":
+            suffix = Path(file_path).suffix.lower()
+            if suffix == ".json":
+                format = "json"
+            elif suffix == ".csv":
+                format = "csv"
+            else:
+                click.echo("Error: Could not determine format. Use --format option.", err=True)
+                return
+        
+        count = 0
+        
+        if format == "json":
+            with open(file_path, 'r') as f:
+                data = json.load(f)
+            notes_data = data if isinstance(data, list) else data.get('notes', [])
+            for item in notes_data:
+                note = Note(
+                    title=item.get('title', 'Untitled'),
+                    content=item.get('content', ''),
+                    tags=item.get('tags', [])
+                )
+                storage.create(note)
+                count += 1
+        
+        elif format == "csv":
+            with open(file_path, 'r') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    note = Note(
+                        title=row.get('title', 'Untitled'),
+                        content=row.get('content', ''),
+                        tags=row.get('tags', '').split(',') if row.get('tags') else []
+                    )
+                    storage.create(note)
+                    count += 1
+        
+        click.echo(f"✓ Imported {count} notes")
+    
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+
+
+@cli.command()
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+def clear(yes):
+    """Delete all notes."""
+    try:
+        if not yes:
+            if not click.confirm("Are you sure you want to delete all notes?"):
+                click.echo("Cancelled.")
+                return
+        
+        count = storage.clear_all()
+        click.echo(f"✓ Deleted {count} notes")
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+
+
+# Import datetime for export command
+from datetime import datetime
 
 
 if __name__ == "__main__":
