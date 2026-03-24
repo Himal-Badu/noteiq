@@ -391,3 +391,175 @@ class TestValidators:
         assert APIKeyValidator.validate_openai_key("sk-abc123defghijklmnopqrstuvwxyz1234567890") == True
         assert APIKeyValidator.validate_openai_key("") == False
         assert APIKeyValidator.validate_openai_key("invalid") == False
+    
+    def test_note_validator_content(self):
+        """Test content validation"""
+        from noteiq.validators import NoteValidator
+        
+        # Valid content should not raise
+        NoteValidator.validate_content("Some content")
+        
+        # Empty content should raise
+        with pytest.raises(ValidationError):
+            NoteValidator.validate_content("")
+    
+    def test_note_validator_tag_characters(self):
+        """Test tag character validation"""
+        from noteiq.validators import NoteValidator
+        
+        # Valid tags should not raise
+        NoteValidator.validate_tags(["tag1", "tag_2", "tag-3"])
+        
+        # Invalid tag characters should raise
+        with pytest.raises(ValidationError):
+            NoteValidator.validate_tags(["tag with spaces"])
+    
+    def test_note_validator_tag_length(self):
+        """Test tag length validation"""
+        from noteiq.validators import NoteValidator
+        
+        # Valid tag length should not raise
+        NoteValidator.validate_tags(["a" * 50])
+        
+        # Too long tag should raise
+        with pytest.raises(ValidationError):
+            NoteValidator.validate_tags(["a" * 51])
+
+
+class TestAI:
+    """Test cases for AI module"""
+    
+    def test_ai_init_without_key(self):
+        """Test AI initialization without API key"""
+        import os
+        # Save original value
+        original = os.environ.get("OPENAI_API_KEY")
+        os.environ["OPENAI_API_KEY"] = ""
+        
+        from noteiq.ai import AINotes
+        from noteiq.exceptions import APIKeyError
+        
+        with pytest.raises(APIKeyError):
+            AINotes()
+        
+        # Restore
+        if original:
+            os.environ["OPENAI_API_KEY"] = original
+    
+    def test_prompt_formatting(self):
+        """Test prompt formatting"""
+        from noteiq.ai import AINotes
+        
+        # Mock the API key for testing
+        import os
+        os.environ["OPENAI_API_KEY"] = "sk-test12345678901234567890123456789012"
+        
+        ai = AINotes()
+        system, user = ai._format_prompt("summarize", content="Test content")
+        
+        assert "summarize" in system.lower() or "note" in system.lower()
+        assert "Test content" in user
+
+
+class TestConfig:
+    """Test cases for configuration"""
+    
+    def test_config_defaults(self):
+        """Test default configuration"""
+        from noteiq.config import Config
+        
+        config = Config()
+        
+        assert config.openai_model == "gpt-3.5-turbo"
+        assert config.openai_temperature == 0.7
+        assert config.openai_max_tokens == 1000
+        assert config.storage_file == "notes.json"
+        assert config.api_port == 8000
+    
+    def test_config_set_api_key(self):
+        """Test setting API key"""
+        from noteiq.config import Config
+        import os
+        
+        config = Config()
+        test_key = "sk-test12345678901234567890123456789012"
+        config.set_api_key(test_key)
+        
+        assert config.openai_api_key == test_key
+        assert config.enable_ai == True
+
+
+class TestStorageAdvanced:
+    """Advanced storage test cases"""
+    
+    @pytest.fixture
+    def temp_storage(self):
+        """Create a temporary storage for testing."""
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as f:
+            temp_file = f.name
+        storage = NoteStorage(data_file=temp_file, backup=False)
+        yield storage
+        os.unlink(temp_file)
+    
+    def test_get_by_title(self, temp_storage):
+        """Test getting notes by title"""
+        note1 = Note(title="Python Tutorial", content="Learn Python")
+        note2 = Note(title="JavaScript Guide", content="Learn JavaScript")
+        temp_storage.create(note1)
+        temp_storage.create(note2)
+        
+        results = temp_storage.get_by_title("python")
+        assert len(results) == 1
+        assert results[0].title == "Python Tutorial"
+    
+    def test_get_pinned(self, temp_storage):
+        """Test getting pinned notes"""
+        note1 = Note(title="Pinned Note", content="Content", is_pinned=True)
+        note2 = Note(title="Regular Note", content="Content", is_pinned=False)
+        temp_storage.create(note1)
+        temp_storage.create(note2)
+        
+        pinned = temp_storage.get_pinned()
+        assert len(pinned) == 1
+        assert pinned[0].title == "Pinned Note"
+    
+    def test_get_archived(self, temp_storage):
+        """Test getting archived notes"""
+        note1 = Note(title="Active Note", content="Content", is_archived=False)
+        note2 = Note(title="Archived Note", content="Content", is_archived=True)
+        temp_storage.create(note1)
+        temp_storage.create(note2)
+        
+        archived = temp_storage.get_archived()
+        assert len(archived) == 1
+        assert archived[0].title == "Archived Note"
+    
+    def test_unarchive_note(self, temp_storage):
+        """Test unarchiving a note"""
+        note = Note(title="Test", content="Content")
+        created = temp_storage.create(note)
+        
+        # Archive
+        temp_storage.archive(created.id)
+        archived = temp_storage.get_archived()
+        assert len(archived) == 1
+        
+        # Unarchive
+        temp_storage.unarchive(created.id)
+        archived = temp_storage.get_archived()
+        assert len(archived) == 0
+    
+    def test_unpin_note(self, temp_storage):
+        """Test unpinning a note"""
+        note = Note(title="Test", content="Content")
+        created = temp_storage.create(note)
+        
+        # Pin
+        temp_storage.pin(created.id)
+        pinned = temp_storage.get_pinned()
+        assert len(pinned) == 1
+        
+        # Unpin
+        temp_storage.unpin(created.id)
+        pinned = temp_storage.get_pinned()
+        assert len(pinned) == 0

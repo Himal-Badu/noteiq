@@ -224,7 +224,8 @@ class NoteStorage:
 
     def get_archived(self) -> List[Note]:
         """Get archived notes"""
-        return self.get_all(include_archived=True)
+        notes = self.get_all(include_archived=True)
+        return [n for n in notes if n.is_archived]
 
     def update(self, note_id: str, note: Note) -> Optional[Note]:
         """
